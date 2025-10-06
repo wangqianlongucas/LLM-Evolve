@@ -12,19 +12,19 @@ SEED_OPERATORS = {
     new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
     return new_sol""",
     
-    # "2-opt": """def operator(solution):
-    # import random
-    # new_sol = solution[:]
-    # i, j = sorted(random.sample(range(len(solution)), 2))
-    # new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
-    # return new_sol""",
+    "2-opt": """def operator(solution):
+    import random
+    new_sol = solution[:]
+    i, j = sorted(random.sample(range(len(solution)), 2))
+    new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
+    return new_sol""",
     
-    # "3-swap": """def operator(solution):
-    # import random
-    # new_sol = solution[:]
-    # i, j, k = random.sample(range(len(solution)), 3)
-    # new_sol[i], new_sol[j], new_sol[k] = new_sol[j], new_sol[k], new_sol[i]
-    # return new_sol""",
+    "3-swap": """def operator(solution):
+    import random
+    new_sol = solution[:]
+    i, j, k = random.sample(range(len(solution)), 3)
+    new_sol[i], new_sol[j], new_sol[k] = new_sol[j], new_sol[k], new_sol[i]
+    return new_sol""",
 }
 
 class OperatorPopulation:

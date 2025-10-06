@@ -3,13 +3,15 @@ from llm_client import llm_client
 from operator_population import OperatorPopulation
 from prompt_population import PromptPopulation
 from evaluator import evaluate_operator
+from logger import ExperimentLogger
 from config import MAX_GENERATIONS, OPERATOR_POP_SIZE, PROMPT_POP_SIZE, PROMPT_UPDATE_FREQ, TOP_K_FOR_DIVERSITY
 
 class EAController:
-    def __init__(self, instances):
+    def __init__(self, instances, log_dir="logs"):
         self.instances = instances
         self.operator_pop = OperatorPopulation(OPERATOR_POP_SIZE, instances)
         self.prompt_pop = PromptPopulation(PROMPT_POP_SIZE)
+        self.logger = ExperimentLogger(log_dir)
         
     def run(self):
         """EA主循环"""
@@ -22,6 +24,7 @@ class EAController:
         self.prompt_pop.initialize()
         
         best_ever = self.operator_pop.get_best()
+        self.logger.log_best(best_ever)
         
         # EA循环
         for gen in range(MAX_GENERATIONS):
@@ -87,6 +90,8 @@ class EAController:
                         # 更新最优
                         if offspring["fitness"] < best_ever["fitness"]:
                             best_ever = offspring
+                            self.logger.log_best(best_ever)
+                            self.logger.save_best_operator(best_ever)
                             print(f"    🎉 发现新最优解: {best_ever['fitness']:.2f}")
                     else:
                         print(f"    ❌ 评估失败: {result.get('error', 'Unknown')[:50]}")
@@ -101,6 +106,15 @@ class EAController:
             else:
                 print(f"\n5️⃣ ⚠️ 本代未生成有效子代")
             
+            # 记录本代日志
+            current_best = self.operator_pop.get_best()
+            self.logger.log_generation(gen + 1, {
+                "offspring_count": len(offspring_list),
+                "current_best_fitness": current_best["fitness"],
+                "best_ever_fitness": best_ever["fitness"],
+                "population_size": len(self.operator_pop.population)
+            })
+            
             # ===== Prompt进化 =====
             if (gen + 1) % PROMPT_UPDATE_FREQ == 0:
                 print(f"\n🔄 Prompt种群进化...")
@@ -108,15 +122,33 @@ class EAController:
                 self.prompt_pop.generate_new_prompt()
             
             # 当前最优
-            current_best = self.operator_pop.get_best()
             print(f"\n📊 当前最优: {current_best['fitness']:.2f}")
             print(f"📊 历史最优: {best_ever['fitness']:.2f}")
+            
+            # 定期保存种群快照
+            if (gen + 1) % 5 == 0 or (gen + 1) == MAX_GENERATIONS:
+                self.logger.save_population(gen + 1, self.operator_pop.population, self.prompt_pop.population)
         
         print(f"\n{'='*60}")
         print("🎉 进化完成!")
         print(f"{'='*60}")
         print(f"最优fitness: {best_ever['fitness']:.2f}")
         print(f"最优算子代码:\n{best_ever['code']}")
+        
+        # 保存最终结果
+        self.logger.save_best_operator(best_ever)
+        self.logger.save_population(MAX_GENERATIONS, self.operator_pop.population, self.prompt_pop.population)
+        
+        # 保存实验总结
+        import config
+        config_dict = {
+            "MAX_GENERATIONS": MAX_GENERATIONS,
+            "OPERATOR_POP_SIZE": OPERATOR_POP_SIZE,
+            "PROMPT_POP_SIZE": PROMPT_POP_SIZE,
+            "TOP_K_FOR_DIVERSITY": TOP_K_FOR_DIVERSITY,
+            "SA_TIMEOUT": config.SA_TIMEOUT
+        }
+        self.logger.save_summary(best_ever, config_dict)
         
         return best_ever
     

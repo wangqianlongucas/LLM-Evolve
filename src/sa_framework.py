@@ -1,4 +1,4 @@
-"""模拟退火框架"""
+"""模拟退火框架（使用距离矩阵优化）"""
 import random
 import math
 import time
@@ -22,7 +22,7 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
     
     # 初始化
     current = generate_initial_solution(instance.n_cities)
-    current_cost = calculate_total_cost(current, instance.coords)
+    current_cost = calculate_total_cost(current, instance.dist_matrix)
     best = current[:]
     best_cost = current_cost
     
@@ -75,7 +75,7 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
                 # 重置失败计数
                 failed_attempts = 0
                 
-                neighbor_cost = calculate_total_cost(neighbor, instance.coords)
+                neighbor_cost = calculate_total_cost(neighbor, instance.dist_matrix)
                 delta = neighbor_cost - current_cost
                 
                 # SA接受准则

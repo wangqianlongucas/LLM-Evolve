@@ -69,7 +69,8 @@ logs/
   └── exp_YYYYMMDD_HHMMSS/   # 每次实验日志
       ├── experiment_log.json      # 完整进化日志
       ├── best_operator.py         # 最优算子代码
-      ├── gen_N_population.json    # 第N代种群快照
+      ├── all_operators.txt        # 所有代的算子代码
+      ├── all_prompts.txt          # 所有代的Prompt
       └── summary.txt              # 实验总结
 ```
 
@@ -134,16 +135,21 @@ logs/
 
 ```
 logs/exp_20241006_143025/
-├── experiment_log.json        # 完整的进化过程
+├── experiment_log.json        # 完整的进化过程（JSON）
 │   ├── generations[]          # 每代的详细信息
 │   └── best_history[]         # 最优解历史
 │
 ├── best_operator.py           # 最优算子代码（可直接运行）
 │
-├── gen_5_population.json      # 第5代种群快照
-├── gen_10_population.json     # 第10代种群快照
-│   ├── operators[]            # 所有算子的代码和fitness
-│   └── prompts[]              # 所有prompt的文本和fitness
+├── all_operators.txt          # 所有代的算子代码（追加模式）
+│   ├── 第1代算子种群
+│   ├── 第5代算子种群
+│   └── 第10代算子种群
+│
+├── all_prompts.txt            # 所有代的Prompt（追加模式）
+│   ├── 第1代Prompt种群
+│   ├── 第5代Prompt种群
+│   └── 第10代Prompt种群
 │
 └── summary.txt                # 实验总结报告
     ├── 配置参数
@@ -156,3 +162,78 @@ logs/exp_20241006_143025/
 - 每5代：保存种群快照
 - 实验结束时：保存完整总结
 
+
+# NEXT
+## A. Prompt 侧：显式上下文 + 随机模板 + 渲染评测 + 元提示库
+
+1. **把评测详情渲染进 prompt**
+   在 `_generate_offspring` 组装用户提示时，附上一段**表格**（来自最近 N 个候选的 `details` + 失败原因 Top-K）。数据从 `logger`/最近一代 `offspring_list` 抽取。论文明确建议“Rendered evaluation results”。
+   落点：`ea_main.py` 里 `_generate_offspring(...)` 拼装 `user_prompt` 的地方。
+
+2. **模板随机化（Stochastic formatting）**
+   新增 `prompt_templates.yaml`：同一语义的多种句式+概率；每次采样 1 份合成 `user_prompt`。
+   落点：`prompt_population.select_prompt()` 返回后，再套模板；或在 `PromptPopulation.initialize()` 时就扩增。
+
+3. **元提示进化：独立库 + 适应度**
+   你已有 `generate_new_prompt()`，将其产物**单独**存放（`meta_prompt_db.jsonl`），按“使用带来的相对提升（已记录）+ 多样性”更新适应度，再与普通 prompt 共竞。 
+
+4. **更强的父代上下文**
+   `operator_population.generate_random_operator()` 已把 top-K 片段注入 `diversity_hint`，建议再加**行为统计**（见 §C），以便 LLM 规避已见策略。
+
+## B. 生成输出：兼容 Diff（SEARCH/REPLACE）
+
+* 在 `llm_client` 的 `_extract_operator()` 前先检测是否包含
+  `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE`。若有，调用一个 `apply_patch(parent_code, diff_text)` 产生新代码；否则走你现在的“提取 `def operator`”路径。论文给了格式定义与示例。
+  落点：`llm_client.py`（或你已替换版）。
+
+## C. 评测：级联 + 行为特征
+
+1. **三级评测（建议数值）**
+
+* **Tier-0**：10 城市、100 次 `operator` 调用自检（合法排列 + 单次<5ms + 不报错）；不合格直接淘汰。
+* **Tier-1**：在 1–2 个小实例上跑 `SA`（`max_iter` 减半，`timeout`=3s）。
+* **Tier-2**：通过者再上你当前全量设置。
+  落点：`evaluate_operator` 外围加壳或拆为 `evaluate_tiered(...)`。 
+
+2. **行为特征（用于 MAP-Elites 与多样性）**
+   记录：
+
+* 平均改动跨度（索引距离 / 2-opt 段长均值）；
+* 接受率曲线（随温度/时间）；
+* 单步 `operator` 耗时均值/95 分位；
+* 生成解的 Hamming 距离均值（对当前/最佳）。
+  落点：`sa_framework.simulated_annealing` 内计数并返回，或在 `evaluate_operator` 汇总。
+
+## D. 进化策略：MAP-Elites + 岛屿
+
+* 以（改动跨度, 接受率）或（改动跨度, 时间）做 2D 网格，每格仅保“精英”（最低 avg_cost）。每代子代先尝试填充/挑战其格。
+* 维护 2–4 个“岛屿”（各自运行若干代），周期性交换前 10% 精英。
+  落点：扩展 `operator_population.update_population()` 与 `EAController.run()` 的种群维护；支持“按行为落格”。  
+
+## E. 并行/异步
+
+* 评测并行：`ProcessPoolExecutor(max_workers=4–8)` 包装 `evaluate_operator`（每子进程独立超时）。
+* 进一步做成 **async 管线**（生成/评测/选择解耦），与论文一致。
+  落点：`ea_main.py` 里一代循环对 `offspring_list` 评测处。
+
+## F. 多模型级联
+
+* `LLM_FAST`：温度略高，生成 4–8 个候选；
+* `LLM_STRONG`：对 top-M 候选做“自审 + 最小修补（diff）”；
+* 失败/报错样本用强模型“只修 bug”模式再试一次（不追求创新）。
+  落点：`config.py` 增加第二模型名；`llm_client` 增加 `generate_strict/critique` 接口。
+
+## G. 程序数据库（持久化 & 取样）
+
+* 新建 `program_db.jsonl`（或 SQLite）：字段含 `sha, code, metrics(avg_cost/time/gap), behaviors, errors, ancestry(parent_id), prompt_id, ts`。
+* 抽样策略：从（高分、低分、稀有行为）各取一部分，喂进 prompt 的“Prior programs + Current program”段落。论文强调“把历史程序（不同定义的‘好’）放进上下文能提高多样性”。
+  落点：`logger.py` 旁新建 `program_db.py`；在 `ea_main.py` 每次评测成功/失败都落 DB。
+
+## H. 安全与稳健性（建议保留）
+
+* 你当前评测在主进程 `exec`，建议切到**子进程沙箱 + 受限内置**（防卡死/资源滥用）。落点：`evaluator.py`。
+
+## I. 实例与级别（配合评测级联）
+
+* 你已提供 `tsp_instances.json`，建议按难度分层（如 eil51/berlin52→st70），用于 Tier-1/2。 
+* `run.py` 现默认 `limit=2`，可以在 Tier-2 才扩大。

@@ -3,23 +3,23 @@ import random
 from llm_client import llm_client
 from evaluator import evaluate_operator
 
-# 手写种子算子
+# 手写种子算子（带距离矩阵参数）
 SEED_OPERATORS = {
-    "2-swap": """def operator(solution):
+    "2-swap": """def operator(solution, dist_matrix=None):
     import random
     new_sol = solution[:]
     i, j = random.sample(range(len(solution)), 2)
     new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
     return new_sol""",
     
-    "2-opt": """def operator(solution):
+    "2-opt": """def operator(solution, dist_matrix=None):
     import random
     new_sol = solution[:]
     i, j = sorted(random.sample(range(len(solution)), 2))
     new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
     return new_sol""",
     
-    "3-swap": """def operator(solution):
+    "3-swap": """def operator(solution, dist_matrix=None):
     import random
     new_sol = solution[:]
     i, j, k = random.sample(range(len(solution)), 3)
@@ -52,12 +52,13 @@ class OperatorPopulation:
                 self.next_id += 1
                 print(f"  ✅ {name}: {result['avg_objective']:.2f}")
         
-        # LLM生成剩余个体
-        while len(self.population) < self.pop_size:
-            code = self._generate_random_operator()
+        # LLM生成剩余个体（带diversity约束）
+        attempts = 0
+        max_attempts = self.pop_size * 3  # 最多尝试3倍
+        while len(self.population) < self.pop_size and attempts < max_attempts:
+            attempts += 1
+            code = self._generate_random_operator(self.population)
             if code:
-                # 算子代码生成成功后，打印算子代码
-                print(f"  ✅ 算子代码生成成功: {code}")
                 result = evaluate_operator(code, self.instances)
                 if result["success"]:
                     self.population.append({
@@ -69,29 +70,76 @@ class OperatorPopulation:
                     })
                     self.next_id += 1
                     print(f"  ✅ LLM生成: {result['avg_objective']:.2f}")
-            else:
-                print(f"  ❌ 算子代码生成失败")
+        
+        if len(self.population) < self.pop_size:
+            print(f"  ⚠️ 只生成了 {len(self.population)} 个算子（目标: {self.pop_size}）")
         
         print(f"✅ 初始种群完成，大小: {len(self.population)}\n")
     
-    def _generate_random_operator(self):
-        """生成随机算子"""
+    def _generate_random_operator(self, existing_operators):
+        """生成随机算子（带diversity约束）"""
+        # 构建已有算子摘要
+        if existing_operators:
+            existing_summary = "\n".join([
+                f"算子{i+1}: {op['code'][:120]}..."
+                for i, op in enumerate(existing_operators[-3:])  # 只显示最近的3个
+            ])
+            diversity_hint = f"""
+【已有算子（避免重复）】
+{existing_summary}
+
+请生成与上述算子不同的新算子，可以尝试：
+- 不同的邻域结构（如3-opt, insert, reverse等）
+- 组合多种操作
+- 自适应策略
+"""
+        else:
+            diversity_hint = ""
+        
         system_prompt = "你是TSP算法专家，只输出代码，不要任何解释"
-        user_prompt = """生成一个TSP邻域算子。
+        user_prompt = f"""生成一个TSP邻域算子。
 
 要求：
 1. 函数名必须是 operator
-2. 输入：solution (list) - 城市访问顺序，如 [0, 2, 1, 3]
+2. 输入参数：
+   - solution (list): 城市访问顺序，如 [0, 2, 1, 3]
+   - dist_matrix (list[list]): 城市间距离矩阵，dist_matrix[i][j]表示城市i到j的距离
 3. 输出：new_solution (list) - 新的城市访问顺序
-4. 只返回函数定义代码，不要任何解释文字
-5. 确保代码简洁高效，避免死循环
+4. 可以利用dist_matrix设计基于距离的智能策略（如优先交换距离大的边）
+5. 只返回函数定义代码，不要任何解释文字
+6. 确保代码简洁高效，避免死循环
+{diversity_hint}
 
 示例格式：
-def operator(solution):
+def operator(solution, dist_matrix=None):
     import random
     new_sol = solution[:]
     i, j = random.sample(range(len(solution)), 2)
     new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
+    return new_sol
+
+高级示例（使用距离矩阵）：
+def operator(solution, dist_matrix=None):
+    import random
+    new_sol = solution[:]
+    # 找到距离最大的边进行优化
+    if dist_matrix:
+        max_dist = 0
+        max_i = 0
+        for i in range(len(solution)):
+            j = (i + 1) % len(solution)
+            dist = dist_matrix[solution[i]][solution[j]]
+            if dist > max_dist:
+                max_dist = dist
+                max_i = i
+        # 对最差的边进行2-opt
+        i, j = max_i, (max_i + 2) % len(solution)
+        if i > j:
+            i, j = j, i
+        new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
+    else:
+        i, j = random.sample(range(len(solution)), 2)
+        new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
     return new_sol"""
         return llm_client.generate(system_prompt, user_prompt)
     

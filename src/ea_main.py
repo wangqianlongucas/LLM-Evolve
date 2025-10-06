@@ -176,14 +176,17 @@ class EAController:
 
 【输出要求】
 1. 函数名必须是 operator
-2. 输入：solution (list) - 城市访问顺序
+2. 输入参数：
+   - solution (list): 城市访问顺序
+   - dist_matrix (list[list]): 距离矩阵，可用于智能决策
 3. 输出：new_solution (list) - 新的城市访问顺序
-4. 只返回改进后的函数定义，不要任何解释、注释或markdown标记
-5. 确保代码可直接执行，避免死循环和复杂逻辑
-6. 与现有top算子保持差异性，创新邻域结构
+4. 可以利用dist_matrix设计基于距离的策略
+5. 只返回改进后的函数定义，不要任何解释、注释或markdown标记
+6. 确保代码可直接执行，避免死循环和复杂逻辑
+7. 与现有top算子保持差异性，创新邻域结构
 
 【输出格式】
-def operator(solution):
+def operator(solution, dist_matrix=None):
     # 改进后的代码
     ...
     return new_sol"""

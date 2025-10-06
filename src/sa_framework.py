@@ -54,7 +54,7 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
             try:
                 # 单次operator调用超时保护
                 op_start = time.time()
-                neighbor = operator_func(current)
+                neighbor = operator_func(current, instance.dist_matrix)
                 op_time = time.time() - op_start
                 
                 # operator执行时间过长（可能有问题）

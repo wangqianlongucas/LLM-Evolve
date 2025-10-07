@@ -125,7 +125,8 @@ logs/
 - `SA_T_END = 0.1`：终止温度
 - `SA_COOLING_RATE = 0.95`：冷却率
 - `SA_MAX_ITER = 100`：每温度最大迭代
-- `SA_TIMEOUT = 20`：最大运行时间（秒）
+- `SA_TIMEOUT = 20`：SA内部超时（秒）
+- `PROCESS_TIMEOUT = 40`：进程级强制超时（秒），防止死循环
 
 ## 📊 输出示例
 

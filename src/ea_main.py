@@ -5,7 +5,7 @@ from prompt_population import PromptPopulation
 from logger import ExperimentLogger
 from worker import evaluate_one_process
 from config import MAX_GENERATIONS, OPERATOR_POP_SIZE, PROMPT_POP_SIZE, PROMPT_UPDATE_FREQ, TOP_K_FOR_DIVERSITY
-from config import MAX_WORKERS_LLM, MAX_WORKERS_EVAL
+from config import MAX_WORKERS_LLM, MAX_WORKERS_EVAL, PROCESS_TIMEOUT
 import time
 
 class EAController:
@@ -261,11 +261,12 @@ def accept_criterion(delta, T, info):
                 )
                 futures[future] = (idx, data)
             
-            # 收集结果
+            # 收集结果（带进程级超时控制）
             for future in as_completed(futures):
                 idx, data = futures[future]
                 try:
-                    result = future.result()
+                    # 进程级超时：如果超时会抛出TimeoutError，自动终止该进程
+                    result = future.result(timeout=PROCESS_TIMEOUT)
                     
                     if result["success"]:
                         offspring = {
@@ -283,6 +284,10 @@ def accept_criterion(delta, T, info):
                         print(f"    ✅ [{idx+1}/{OPERATOR_POP_SIZE}] fitness={offspring['fitness']:.2f}")
                     else:
                         print(f"    ❌ [{idx+1}/{OPERATOR_POP_SIZE}] 评估失败: {result.get('error', 'Unknown')[:50]}")
+                except TimeoutError:
+                    # 进程超时，已被自动终止
+                    print(f"    ⏰ [{idx+1}/{OPERATOR_POP_SIZE}] 进程超时({PROCESS_TIMEOUT}秒)，已强制终止（可能存在死循环）")
+                    future.cancel()  # 取消future（进程已被终止）
                 except Exception as e:
                     print(f"    ❌ [{idx+1}/{OPERATOR_POP_SIZE}] 进程异常: {str(e)[:50]}")
         

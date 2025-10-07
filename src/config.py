@@ -31,7 +31,10 @@ SA_T_INIT = 100
 SA_T_END = 0.1
 SA_COOLING_RATE = 0.98
 SA_MAX_ITER = 100
-SA_TIMEOUT = 30  # SA运行最大时间（秒）
+SA_TIMEOUT = 30  # SA内部超时（秒）
+
+# 进程级超时控制（防止死循环）
+PROCESS_TIMEOUT = 40  # 进程级强制超时（秒），应该 > SA_TIMEOUT
 
 # 计算SA最大迭代次数
 def _calculate_max_iterations():

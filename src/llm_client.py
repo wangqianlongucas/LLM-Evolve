@@ -33,6 +33,9 @@ class LLMClient:
 
 # 全局实例
 llm_client = LLMClient()
-# 测试LLM是否链接成功
-print(llm_client.generate('你是什么模型', ''))
+
+
+if __name__ == "__main__":
+    # 测试LLM是否链接成功
+    print(llm_client.generate('你是什么模型', ''))
 

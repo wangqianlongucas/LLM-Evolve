@@ -2,9 +2,36 @@
 
 ## 🎯 项目简介
 
-使用LLM自动生成和进化TSP算法的邻域算子，采用**双种群进化框架**：
-- **算子种群**：LLM生成的TSP邻域算子（2-swap, 2-opt等）
-- **Prompt种群**：指导LLM改进算子的提示词
+使用LLM自动生成和进化完整的TSP算法组件，采用**双种群进化框架**：
+- **算法组件种群**：LLM生成的完整算法（算子 + 信息加工 + 接受准则）
+- **Prompt种群**：指导LLM改进算法的提示词
+
+### 🆕 算法组件包含三部分
+1. **邻域算子** (`operator`)：生成邻域解
+   ```python
+   def operator(solution, dist_matrix, info):
+       # solution: 当前解
+       # dist_matrix: 距离矩阵
+       # info: 搜索信息（进度、温度等）
+       return new_solution
+   ```
+
+2. **信息加工** (`process_info`)：计算进度、温度比率等信息
+   ```python
+   def process_info(iteration, total_iterations, T, T_init, 
+                    current_cost, best_cost, dist_matrix):
+       # 计算搜索进度、温度比率等
+       return {'progress': ..., 'temperature_ratio': ...}
+   ```
+
+3. **接受准则** (`accept_criterion`)：决定是否接受新解
+   ```python
+   def accept_criterion(delta, T, info):
+       # delta: 成本差
+       # T: 当前温度
+       # info: 搜索信息
+       return True/False  # 是否接受
+   ```
 
 ## 🏗️ 架构
 
@@ -79,11 +106,15 @@ logs/
 `src/config.py`：
 
 **EA参数**：
-- `MAX_GENERATIONS = 10`：进化代数
-- `OPERATOR_POP_SIZE = 5`：算子种群大小
-- `PROMPT_POP_SIZE = 5`：Prompt种群大小
-- `PROMPT_UPDATE_FREQ = 2`：每N代更新Prompt种群
-- `TOP_K_FOR_DIVERSITY = 3`：生成时参考的top K个体数
+- `MAX_GENERATIONS = 30`：进化代数
+- `OPERATOR_POP_SIZE = 10`：算子种群大小
+- `PROMPT_POP_SIZE = 8`：Prompt种群大小
+- `PROMPT_UPDATE_FREQ = 3`：每N代更新Prompt种群
+- `TOP_K_FOR_DIVERSITY = 5`：生成时参考的top K个体数
+
+**并发参数**：
+- `MAX_WORKERS_LLM = 10`：LLM API并发数（多线程，IO密集型）
+- `MAX_WORKERS_EVAL = 5`：评估并发数（多进程，CPU密集型，建议≤CPU核心数）
 
 **Prompt fitness**：
 - `PROMPT_ALPHA = 0.7`：平均性能权重
@@ -91,28 +122,36 @@ logs/
 
 **SA参数**：
 - `SA_T_INIT = 100`：初始温度
-- `SA_T_END = 10`：终止温度
+- `SA_T_END = 0.1`：终止温度
 - `SA_COOLING_RATE = 0.95`：冷却率
 - `SA_MAX_ITER = 100`：每温度最大迭代
-- `SA_TIMEOUT = 200`：最大运行时间（秒）
+- `SA_TIMEOUT = 20`：最大运行时间（秒）
 
 ## 📊 输出示例
 
 ```
-📍 Generation 2/10
+📍 Generation 2/30
 ============================================================
-🔄 生成 5 个子代...
-
-  [1/5]
-    1️⃣ 父本: op_2, fitness=8234.56
-    2️⃣ Prompt: 增加邻域多样性，避免局部最优...
-    3️⃣ LLM生成...
-    4️⃣ 评估...
-    ✅ fitness=8123.45
+🔄 混合并发生成 10 个子代...
+  1️⃣ 选择父本和Prompt...
+  2️⃣ 并发LLM生成（10线程 - IO密集）...
+    ✅ [1/10] 生成完成
+    ✅ [3/10] 生成完成
+    ✅ [2/10] 生成完成
+    ...
+     ⏱️  LLM生成耗时: 15.3秒
+  3️⃣ 并发评估（5进程 - CPU密集）...
+    ✅ [1/10] fitness=8123.45
+    ...
+     ⏱️  评估耗时: 8.7秒
+     ⏱️  本代总耗时: 24.0秒
     🎉 发现新最优解: 8123.45
+    ✅ [2/10] fitness=8234.56
+    ✅ [3/10] fitness=8189.32
+    ...
 
-5️⃣ 更新种群: 4个有效子代
-   新种群大小: 5
+5️⃣ 更新种群: 8个有效子代
+   新种群大小: 10
 
 📊 当前最优: 8123.45
 📊 历史最优: 8123.45
@@ -121,13 +160,21 @@ logs/
 ## 🔍 核心特性
 
 1. **批量生成**：每代生成N个子代，父代+子代选择（标准EA框架）
-2. **多样性保护**：生成时参考Top K个体，避免简单重复
-3. **解的有效性检查**：evaluator自动检测重复访问的城市
-4. **死循环保护**：多层超时机制（总时间、迭代次数、单次operator时间）
-5. **双种群共进化**：算子和Prompt同时进化
-6. **元进化**：使用LLM生成新的改进方向（元Prompt）
-7. **日志保存**：自动保存每代进化日志和最优算子
-8. **简洁设计**：专注核心功能，代码简洁易读
+2. **混合并发策略**：⚡ LLM生成用多线程（IO密集），评估用多进程（CPU密集），性能最优
+   - 并发LLM API调用（多线程，IO密集型）
+   - 并发算子评估（多进程，CPU密集型，绕过GIL）
+3. **完整算法生成**：⭐ LLM同时生成3个组件（算子+信息加工+接受准则）
+   - 支持自适应策略（根据搜索进度调整）
+   - 支持自定义接受准则（不限于Metropolis）
+4. **多样性保护**：生成时参考Top K个体，避免简单重复
+5. **距离矩阵优化**：预计算距离，算子可访问距离信息做智能决策
+6. **信息丰富**：算子可访问迭代次数、温度、进度等信息
+7. **解的有效性检查**：evaluator自动检测重复访问的城市
+8. **死循环保护**：多层超时机制（总时间、迭代次数、单次operator时间）
+9. **双种群共进化**：算法组件和Prompt同时进化
+10. **元进化**：使用LLM生成新的改进方向（元Prompt）
+11. **日志保存**：自动保存每代进化日志和最优算法
+12. **简洁设计**：专注核心功能，代码简洁易读
 
 ## 📝 日志系统
 

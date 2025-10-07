@@ -1,10 +1,12 @@
-"""EA主循环"""
-from llm_client import llm_client
+"""EA主循环（支持混合并发：LLM多线程 + 评估多进程）"""
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from operator_population import OperatorPopulation
 from prompt_population import PromptPopulation
-from evaluator import evaluate_operator
 from logger import ExperimentLogger
+from worker import evaluate_one_process
 from config import MAX_GENERATIONS, OPERATOR_POP_SIZE, PROMPT_POP_SIZE, PROMPT_UPDATE_FREQ, TOP_K_FOR_DIVERSITY
+from config import MAX_WORKERS_LLM, MAX_WORKERS_EVAL
+import time
 
 class EAController:
     def __init__(self, instances, log_dir="logs"):
@@ -36,67 +38,61 @@ class EAController:
             top_k_operators = self.operator_pop.get_top_k(TOP_K_FOR_DIVERSITY)
             top_k_prompts = self.prompt_pop.get_top_k(TOP_K_FOR_DIVERSITY)
             
-            # ===== 批量生成子代 =====
-            offspring_list = []
+            # ===== 并发生成子代 =====
+            print(f"🔄 混合并发生成 {OPERATOR_POP_SIZE} 个子代...")
+            gen_start_time = time.time()
             
-            print(f"🔄 生成 {OPERATOR_POP_SIZE} 个子代...")
-            
+            # 1. 批量选择父本和Prompt
+            print(f"  1️⃣ 选择父本和Prompt...")
+            parent_prompt_pairs = []
             for i in range(OPERATOR_POP_SIZE):
-                print(f"\n  [{i+1}/{OPERATOR_POP_SIZE}]")
-                
-                # 1. 选择父本
                 parent = self.operator_pop.select_parent()
-                print(f"    1️⃣ 父本: {parent['id']}, fitness={parent['fitness']:.2f}")
-                
-                # 2. 选择Prompt
                 selected_prompt = self.prompt_pop.select_prompt()
-                print(f"    2️⃣ Prompt: {selected_prompt['text'][:50]}...")
-                
-                # 3. LLM生成新算子（带diversity约束）
-                print(f"    3️⃣ LLM生成...")
-                offspring_code = self._generate_offspring(
-                    parent["code"], 
-                    selected_prompt["text"],
-                    top_k_operators,
-                    top_k_prompts
+                parent_prompt_pairs.append({
+                    "index": i,
+                    "parent": parent,
+                    "prompt": selected_prompt
+                })
+            
+            # 2. 并发LLM生成算子（多线程 - IO密集）
+            llm_start = time.time()
+            print(f"  2️⃣ 并发LLM生成（{MAX_WORKERS_LLM}线程 - IO密集）...")
+            generated_codes = self._concurrent_generate(
+                parent_prompt_pairs, 
+                top_k_operators, 
+                top_k_prompts
+            )
+            llm_time = time.time() - llm_start
+            print(f"     ⏱️  LLM生成耗时: {llm_time:.1f}秒")
+            
+            # 3. 并发评估算子（多进程 - CPU密集）
+            eval_start = time.time()
+            print(f"  3️⃣ 并发评估（{MAX_WORKERS_EVAL}进程 - CPU密集）...")
+            offspring_list = self._concurrent_evaluate(
+                generated_codes,
+                parent_prompt_pairs
+            )
+            eval_time = time.time() - eval_start
+            print(f"     ⏱️  评估耗时: {eval_time:.1f}秒")
+            
+            gen_total_time = time.time() - gen_start_time
+            print(f"     ⏱️  本代总耗时: {gen_total_time:.1f}秒")
+            
+            # 4. 更新Prompt使用记录和最优解
+            for offspring in offspring_list:
+                # 记录Prompt使用结果
+                self.prompt_pop.record_usage(
+                    offspring["prompt_id"],
+                    offspring["fitness"],
+                    offspring["parent_fitness"]
                 )
                 
-                if offspring_code:
-                    # 4. 评估
-                    print(f"    4️⃣ 评估...")
-                    result = evaluate_operator(offspring_code, self.instances)
-                    
-                    if result["success"]:
-                        offspring = {
-                            "id": f"op_{self.operator_pop.next_id}",
-                            "code": offspring_code,
-                            "fitness": result["avg_objective"],
-                            "time": result["avg_time"],
-                            "parent_id": parent["id"],
-                            "prompt_used": selected_prompt["text"]
-                        }
-                        self.operator_pop.next_id += 1
-                        offspring_list.append(offspring)
-                        
-                        print(f"    ✅ fitness={offspring['fitness']:.2f}")
-                        
-                        # 记录Prompt使用结果
-                        self.prompt_pop.record_usage(
-                            selected_prompt["id"],
-                            offspring["fitness"],
-                            parent["fitness"]
-                        )
-                        
-                        # 更新最优
-                        if offspring["fitness"] < best_ever["fitness"]:
-                            best_ever = offspring
-                            self.logger.log_best(best_ever)
-                            self.logger.save_best_operator(best_ever)
-                            print(f"    🎉 发现新最优解: {best_ever['fitness']:.2f}")
-                    else:
-                        print(f"    ❌ 评估失败: {result.get('error', 'Unknown')[:50]}")
-                else:
-                    print(f"    ❌ LLM生成失败")
+                # 更新最优
+                if offspring["fitness"] < best_ever["fitness"]:
+                    best_ever = offspring
+                    self.logger.log_best(best_ever)
+                    self.logger.save_best_operator(best_ever)
+                    print(f"    🎉 发现新最优解: {best_ever['fitness']:.2f}")
             
             # 5. 更新种群（父代+子代选择）
             if offspring_list:
@@ -154,6 +150,9 @@ class EAController:
     
     def _generate_offspring(self, parent_code, prompt_text, top_k_operators, top_k_prompts):
         """LLM生成子代算子（带diversity约束）"""
+        # 延迟导入llm_client（避免子进程导入）
+        from llm_client import llm_client
+        
         # 构建top K代码摘要
         top_k_summary = "\n".join([
             f"算子{i+1} (fitness={op['fitness']:.2f}): {op['code'][:100]}..."
@@ -175,21 +174,120 @@ class EAController:
 【重要】请生成与上述算子有明显差异的新算子，避免简单重复。
 
 【输出要求】
-1. 函数名必须是 operator
-2. 输入参数：
-   - solution (list): 城市访问顺序
-   - dist_matrix (list[list]): 距离矩阵，可用于智能决策
-3. 输出：new_solution (list) - 新的城市访问顺序
-4. 可以利用dist_matrix设计基于距离的策略
-5. 只返回改进后的函数定义，不要任何解释、注释或markdown标记
+1. 必须生成3个函数：operator, process_info, accept_criterion
+2. operator函数：
+   - 参数：solution (list), dist_matrix (list[list]), info (dict)
+   - 返回：new_solution (list)
+   - 可以利用info中的信息设计自适应策略
+3. process_info函数：
+   - 参数：iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history
+   - cost_history (list): 近100次的目标值历史，可分析趋势
+   - 返回：info (dict)
+4. accept_criterion函数：
+   - 参数：delta (float), T (float), info (dict)
+   - 返回：bool
+5. 只返回函数定义，不要任何解释、注释或markdown标记
 6. 确保代码可直接执行，避免死循环和复杂逻辑
-7. 与现有top算子保持差异性，创新邻域结构
+7. 与现有top算法组件保持差异性，创新设计
 
 【输出格式】
-def operator(solution, dist_matrix=None):
-    # 改进后的代码
+def operator(solution, dist_matrix, info):
     ...
-    return new_sol"""
+    return new_sol
+
+def process_info(iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history):
+    ...
+    return info_dict
+
+def accept_criterion(delta, T, info):
+    ...
+    return True/False"""
         
         return llm_client.generate(system_prompt, user_prompt)
-
+    
+    def _concurrent_generate(self, parent_prompt_pairs, top_k_operators, top_k_prompts):
+        """并发LLM生成算子（多线程，IO密集）"""
+        generated_codes = {}
+        
+        def generate_one(pair):
+            """生成单个算子"""
+            idx = pair["index"]
+            parent = pair["parent"]
+            prompt = pair["prompt"]
+            
+            try:
+                code = self._generate_offspring(
+                    parent["code"],
+                    prompt["text"],
+                    top_k_operators,
+                    top_k_prompts
+                )
+                return idx, code, parent, prompt
+            except Exception as e:
+                print(f"    ❌ [{idx+1}] LLM生成失败: {e}")
+                return idx, None, parent, prompt
+        
+        # 使用ThreadPoolExecutor并发生成
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS_LLM) as executor:
+            futures = {executor.submit(generate_one, pair): pair for pair in parent_prompt_pairs}
+            
+            for future in as_completed(futures):
+                idx, code, parent, prompt = future.result()
+                if code:
+                    generated_codes[idx] = {
+                        "code": code,
+                        "parent": parent,
+                        "prompt": prompt
+                    }
+                    print(f"    ✅ [{idx+1}/{OPERATOR_POP_SIZE}] 生成完成")
+                else:
+                    print(f"    ❌ [{idx+1}/{OPERATOR_POP_SIZE}] 生成失败")
+        
+        return generated_codes
+    
+    def _concurrent_evaluate(self, generated_codes, parent_prompt_pairs):
+        """并发评估算子（多进程，CPU密集）"""
+        offspring_list = []
+        
+        # 使用ProcessPoolExecutor进行CPU密集型计算
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS_EVAL) as executor:
+            # 提交所有评估任务
+            futures = {}
+            for idx, data in generated_codes.items():
+                future = executor.submit(
+                    evaluate_one_process,  # worker模块中的函数，可序列化
+                    data["code"],
+                    self.instances
+                )
+                futures[future] = (idx, data)
+            
+            # 收集结果
+            for future in as_completed(futures):
+                idx, data = futures[future]
+                try:
+                    result = future.result()
+                    
+                    if result["success"]:
+                        offspring = {
+                            "success": True,
+                            "id": f"op_{self.operator_pop.next_id + idx}",
+                            "code": data["code"],
+                            "fitness": result["avg_objective"],
+                            "time": result["avg_time"],
+                            "parent_id": data["parent"]["id"],
+                            "parent_fitness": data["parent"]["fitness"],
+                            "prompt_used": data["prompt"]["text"],
+                            "prompt_id": data["prompt"]["id"]
+                        }
+                        offspring_list.append(offspring)
+                        print(f"    ✅ [{idx+1}/{OPERATOR_POP_SIZE}] fitness={offspring['fitness']:.2f}")
+                    else:
+                        print(f"    ❌ [{idx+1}/{OPERATOR_POP_SIZE}] 评估失败: {result.get('error', 'Unknown')[:50]}")
+                except Exception as e:
+                    print(f"    ❌ [{idx+1}/{OPERATOR_POP_SIZE}] 进程异常: {str(e)[:50]}")
+        
+        # 更新next_id
+        if offspring_list:
+            self.operator_pop.next_id += len(offspring_list)
+        
+        return offspring_list

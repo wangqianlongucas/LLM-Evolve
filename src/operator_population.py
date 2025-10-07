@@ -3,28 +3,83 @@ import random
 from llm_client import llm_client
 from evaluator import evaluate_operator
 
-# 手写种子算子（带距离矩阵参数）
-SEED_OPERATORS = {
-    "2-swap": """def operator(solution, dist_matrix=None):
+# 手写种子算法组件（算子 + 信息加工 + 接受准则）
+SEED_COMPONENTS = {
+    "2-swap_classic": """
+def operator(solution, dist_matrix, info):
     import random
     new_sol = solution[:]
     i, j = random.sample(range(len(solution)), 2)
     new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
-    return new_sol""",
+    return new_sol
+
+def process_info(iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history):
+    # 计算搜索进度
+    progress = iteration / total_iterations if total_iterations > 0 else 0
+    temperature_ratio = T / T_init if T_init > 0 else 0
+    improvement = (current_cost - best_cost) / best_cost if best_cost > 0 else 0
     
-    "2-opt": """def operator(solution, dist_matrix=None):
+    # 分析历史趋势
+    recent_trend = 0
+    if len(cost_history) >= 10:
+        recent_avg = sum(cost_history[-10:]) / 10
+        earlier_avg = sum(cost_history[-20:-10]) / 10 if len(cost_history) >= 20 else recent_avg
+        recent_trend = (recent_avg - earlier_avg) / earlier_avg if earlier_avg > 0 else 0
+    
+    return {
+        'progress': progress,
+        'temperature_ratio': temperature_ratio,
+        'improvement': improvement,
+        'recent_trend': recent_trend
+    }
+
+def accept_criterion(delta, T, info):
+    import random
+    import math
+    # 经典Metropolis准则
+    if delta < 0:
+        return True
+    return random.random() < math.exp(-delta / T) if T > 0 else False
+""",
+    
+    "2-opt_adaptive": """
+def operator(solution, dist_matrix, info):
     import random
     new_sol = solution[:]
-    i, j = sorted(random.sample(range(len(solution)), 2))
-    new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
-    return new_sol""",
-    
-    "3-swap": """def operator(solution, dist_matrix=None):
+    # 根据搜索进度调整邻域大小
+    progress = info.get('progress', 0)
+    if progress < 0.3:
+        # 早期：大邻域
+        i, j = sorted(random.sample(range(len(solution)), 2))
+        new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
+    else:
+        # 后期：小邻域
+        i = random.randint(0, len(solution)-1)
+        j = (i + random.randint(1, 3)) % len(solution)
+        if i > j:
+            i, j = j, i
+        new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
+    return new_sol
+
+def process_info(iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history):
+    progress = iteration / total_iterations if total_iterations > 0 else 0
+    # 计算改进速度
+    improvement_rate = 0
+    if len(cost_history) >= 2:
+        improvement_rate = (cost_history[-1] - cost_history[0]) / cost_history[0] if cost_history[0] > 0 else 0
+    return {'progress': progress, 'improvement_rate': improvement_rate}
+
+def accept_criterion(delta, T, info):
     import random
-    new_sol = solution[:]
-    i, j, k = random.sample(range(len(solution)), 3)
-    new_sol[i], new_sol[j], new_sol[k] = new_sol[j], new_sol[k], new_sol[i]
-    return new_sol""",
+    import math
+    # 自适应接受准则
+    progress = info.get('progress', 0)
+    if delta < 0:
+        return True
+    # 后期更严格
+    adjusted_T = T * (1 - progress * 0.5)
+    return random.random() < math.exp(-delta / adjusted_T) if adjusted_T > 0 else False
+"""
 }
 
 class OperatorPopulation:
@@ -38,8 +93,8 @@ class OperatorPopulation:
         """初始化种群：种子算子 + LLM生成"""
         print("🔧 初始化算子种群...")
         
-        # 添加种子算子
-        for name, code in SEED_OPERATORS.items():
+        # 添加种子算法组件
+        for name, code in SEED_COMPONENTS.items():
             result = evaluate_operator(code, self.instances)
             if result["success"]:
                 self.population.append({
@@ -97,50 +152,55 @@ class OperatorPopulation:
             diversity_hint = ""
         
         system_prompt = "你是TSP算法专家，只输出代码，不要任何解释"
-        user_prompt = f"""生成一个TSP邻域算子。
+        user_prompt = f"""生成一套完整的TSP模拟退火算法组件（三个函数）。
 
 要求：
-1. 函数名必须是 operator
-2. 输入参数：
-   - solution (list): 城市访问顺序，如 [0, 2, 1, 3]
-   - dist_matrix (list[list]): 城市间距离矩阵，dist_matrix[i][j]表示城市i到j的距离
-3. 输出：new_solution (list) - 新的城市访问顺序
-4. 可以利用dist_matrix设计基于距离的智能策略（如优先交换距离大的边）
-5. 只返回函数定义代码，不要任何解释文字
-6. 确保代码简洁高效，避免死循环
 {diversity_hint}
 
-示例格式：
-def operator(solution, dist_matrix=None):
+【必须生成3个函数】
+
+1. operator函数 - 邻域算子
+   - 参数：solution (list), dist_matrix (list[list]), info (dict)
+   - 返回：new_solution (list)
+   - 可以利用info中的进度信息设计自适应策略
+
+2. process_info函数 - 信息加工
+   - 参数：iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history
+   - cost_history (list): 近100次的目标值历史，可用于分析趋势
+   - 返回：info (dict) - 包含各种有用信息
+   - 可以计算进度、温度比率、改进幅度、历史趋势等
+
+3. accept_criterion函数 - 接受准则
+   - 参数：delta (float), T (float), info (dict)
+   - 返回：bool - 是否接受
+   - 可以设计自适应的接受策略
+
+示例：
+def operator(solution, dist_matrix, info):
     import random
     new_sol = solution[:]
+    progress = info.get('progress', 0)
+    # 根据progress调整策略
     i, j = random.sample(range(len(solution)), 2)
     new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
     return new_sol
 
-高级示例（使用距离矩阵）：
-def operator(solution, dist_matrix=None):
+def process_info(iteration, total_iterations, T, T_init, current_cost, best_cost, dist_matrix, cost_history):
+    progress = iteration / total_iterations if total_iterations > 0 else 0
+    temperature_ratio = T / T_init if T_init > 0 else 0
+    # 分析历史趋势
+    trend = 0
+    if len(cost_history) >= 10:
+        trend = (cost_history[-1] - cost_history[-10]) / cost_history[-10] if cost_history[-10] > 0 else 0
+    return {{'progress': progress, 'temperature_ratio': temperature_ratio, 'trend': trend}}
+
+def accept_criterion(delta, T, info):
     import random
-    new_sol = solution[:]
-    # 找到距离最大的边进行优化
-    if dist_matrix:
-        max_dist = 0
-        max_i = 0
-        for i in range(len(solution)):
-            j = (i + 1) % len(solution)
-            dist = dist_matrix[solution[i]][solution[j]]
-            if dist > max_dist:
-                max_dist = dist
-                max_i = i
-        # 对最差的边进行2-opt
-        i, j = max_i, (max_i + 2) % len(solution)
-        if i > j:
-            i, j = j, i
-        new_sol[i:j+1] = list(reversed(new_sol[i:j+1]))
-    else:
-        i, j = random.sample(range(len(solution)), 2)
-        new_sol[i], new_sol[j] = new_sol[j], new_sol[i]
-    return new_sol"""
+    import math
+    if delta < 0:
+        return True
+    return random.random() < math.exp(-delta / T) if T > 0 else False
+"""
         return llm_client.generate(system_prompt, user_prompt)
     
     def select_parent(self):

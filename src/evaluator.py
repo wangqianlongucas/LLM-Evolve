@@ -22,25 +22,36 @@ def evaluate_operator(operator_code, instances, timeout=None):
         timeout = SA_TIMEOUT
     
     try:
-        # 执行代码，加载operator函数
+        # 执行代码，加载三个函数
         namespace = {"__builtins__": __builtins__}
         exec(operator_code, namespace)
         
+        # 检查三个必需函数
         if "operator" not in namespace:
             return {"success": False, "error": "未找到operator函数"}
+        if "process_info" not in namespace:
+            return {"success": False, "error": "未找到process_info函数"}
+        if "accept_criterion" not in namespace:
+            return {"success": False, "error": "未找到accept_criterion函数"}
         
         operator_func = namespace["operator"]
+        process_info_func = namespace["process_info"]
+        accept_criterion_func = namespace["accept_criterion"]
         
-        # 简单检查：确保operator是函数
+        # 简单检查：确保都是函数
         if not callable(operator_func):
             return {"success": False, "error": "operator不是可调用函数"}
+        if not callable(process_info_func):
+            return {"success": False, "error": "process_info不是可调用函数"}
+        if not callable(accept_criterion_func):
+            return {"success": False, "error": "accept_criterion不是可调用函数"}
         
         # 在多个算例上测试
         results = []
         for instance in instances:
             try:
                 best_sol, best_cost, time_used = simulated_annealing(
-                    instance, operator_func,
+                    instance, operator_func, process_info_func, accept_criterion_func,
                     SA_T_INIT, SA_T_END, SA_COOLING_RATE, SA_MAX_ITER,
                     timeout=timeout
                 )

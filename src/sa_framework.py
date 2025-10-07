@@ -1,15 +1,19 @@
-"""模拟退火框架（使用距离矩阵优化）"""
+"""模拟退火框架（支持自定义组件）"""
 import random
 import math
 import time
 from tsp_problem import generate_initial_solution, calculate_total_cost, check_solution_validity
+from config import SA_MAX_TOTAL_ITERATIONS
 
-def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, max_iter, timeout=30):
+def simulated_annealing(instance, operator_func, process_info_func, accept_criterion_func, 
+                       T_init, T_end, cooling_rate, max_iter, timeout=30):
     """
-    SA框架（带超时保护）
+    SA框架（支持自定义组件，带超时保护）
     Args:
         instance: TSP算例
-        operator_func: 邻域算子函数
+        operator_func: 邻域算子函数 operator(solution, dist_matrix, info)
+        process_info_func: 信息加工函数 process_info(iteration, total_iter, T, T_init, current_cost, best_cost, dist_matrix)
+        accept_criterion_func: 接受准则函数 accept_criterion(delta, T, info)
         T_init: 初始温度
         T_end: 终止温度
         cooling_rate: 冷却率
@@ -31,6 +35,9 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
     failed_attempts = 0
     max_failed_attempts = 100  # 连续失败上限
     
+    # 维护近期目标值历史（最多100个）
+    cost_history = [current_cost]
+    
     while T > T_end:
         # 超时检查
         if time.time() - start_time > timeout:
@@ -50,11 +57,26 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
                 if time.time() - start_time > timeout:
                     break
             
+            # 加工信息
+            try:
+                info = process_info_func(
+                    total_iterations,
+                    SA_MAX_TOTAL_ITERATIONS,  # 理论最大迭代次数
+                    T,
+                    T_init,
+                    current_cost,
+                    best_cost,
+                    instance.dist_matrix,
+                    cost_history[-100:]  # 近100次的目标值历史
+                )
+            except Exception:
+                info = {}
+            
             # 生成邻域解
             try:
                 # 单次operator调用超时保护
                 op_start = time.time()
-                neighbor = operator_func(current, instance.dist_matrix)
+                neighbor = operator_func(current, instance.dist_matrix, info)
                 op_time = time.time() - op_start
                 
                 # operator执行时间过长（可能有问题）
@@ -78,10 +100,19 @@ def simulated_annealing(instance, operator_func, T_init, T_end, cooling_rate, ma
                 neighbor_cost = calculate_total_cost(neighbor, instance.dist_matrix)
                 delta = neighbor_cost - current_cost
                 
-                # SA接受准则
-                if delta < 0 or random.random() < math.exp(-delta / T):
+                # 自定义接受准则
+                try:
+                    accept = accept_criterion_func(delta, T, info)
+                except Exception:
+                    # fallback到经典准则
+                    accept = delta < 0 or (random.random() < math.exp(-delta / T) if T > 0 else False)
+                
+                if accept:
                     current = neighbor[:]
                     current_cost = neighbor_cost
+                    
+                    # 记录到历史
+                    cost_history.append(current_cost)
                     
                     if current_cost < best_cost:
                         best = current[:]

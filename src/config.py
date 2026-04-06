@@ -4,7 +4,7 @@ import math
 
 
 # LLM配置
-API_KEY = os.getenv("ALICLOUD_API_KEY", "sk-23986bd8245b41158f89ef0e37007bb5")
+API_KEY = os.getenv("ALICLOUD_API_KEY", "sk-XXX")
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # MODEL_NAME = "qwen-plus"
 MODEL_NAME = "qwen3-max"

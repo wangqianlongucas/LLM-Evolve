@@ -27,6 +27,9 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Config (contains API keys)
+src/config.py
+
 # Temporary files
 *.tmp
 *.bak
